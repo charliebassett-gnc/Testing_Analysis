@@ -1,11 +1,13 @@
 # Testing_Analysis
 
-Analysis of AgileX Hunter SE field tests. The robot runs the path-following stack from
+Analysis of AgileX Hunter SE field tests. The robot runs the path following stack from
 [JetsonControl](https://github.com/charliebassett-gnc/JetsonControl) on a Jetson Orin Nano,
 with position and heading from a Trimble NAV-960. This repo turns the Jetson's run logs into
-per-attempt convergence metrics and graphs so controllers (PID vs ONNX/RL) can be compared.
+per-attempt convergence metrics and graphs so steering controllers (PID vs ONNX/RL) can be compared.
 
 Browse [`results/`](results) to see the graphs from each test day.
+
+IF CLONING REPOSITORY MANUALLY ADD FOLDERS THAT ARE MISSING AS SHOWN BELOW  
 
 ## Folder layout
 
@@ -28,7 +30,7 @@ pip install numpy matplotlib
 
 ## Workflow
 
-1. Copy the logs off the Jetson (run this in **laptop PowerShell**, not in an SSH session):
+1. Connect laptop and Jetson to same wifi network and copy the logs off the Jetson (run this in **laptop PowerShell**, not in an SSH session):
 
    ```powershell
    scp -r trimble@trimble.local:~/trimble-agis-fyp/robot_control/logs "$HOME\Documents\Testing_Analysis\incoming\"
