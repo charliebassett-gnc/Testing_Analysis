@@ -30,7 +30,7 @@ pip install numpy matplotlib
 
 ## Workflow
 
-1. Copy the logs off the Jetson (run this in **laptop PowerShell**, not in an SSH session):
+1. Connect laptop and Jetson to same wifi network and copy the logs off the Jetson (run this in **laptop PowerShell**, not in an SSH session):
 
    ```powershell
    scp -r trimble@trimble.local:~/trimble-agis-fyp/robot_control/logs "$HOME\Documents\Testing_Analysis\incoming\"
