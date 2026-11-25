@@ -1,0 +1,7 @@
+# Raw Jetson logs stay local (archive them on the shared Google Drive)
+incoming/
+raw_data/
+
+__pycache__/
+*.pyc
+.venv/
