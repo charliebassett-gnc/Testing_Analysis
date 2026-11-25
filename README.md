@@ -1,11 +1,13 @@
 # Testing_Analysis
 
-Analysis of AgileX Hunter SE field tests. The robot runs the path-following stack from
+Analysis of AgileX Hunter SE field tests. The robot runs the path following stack from
 [JetsonControl](https://github.com/charliebassett-gnc/JetsonControl) on a Jetson Orin Nano,
 with position and heading from a Trimble NAV-960. This repo turns the Jetson's run logs into
-per-attempt convergence metrics and graphs so controllers (PID vs ONNX/RL) can be compared.
+per-attempt convergence metrics and graphs so steering controllers (PID vs ONNX/RL) can be compared.
 
 Browse [`results/`](results) to see the graphs from each test day.
+
+IF CLONING REPOSITORY MANUALLY ADD FOLDERS THAT ARE MISSING AS SHOWN BELOW  
 
 ## Folder layout
 
