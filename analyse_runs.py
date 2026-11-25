@@ -309,7 +309,7 @@ def plot_run(run, t_max, out_dir):
         if off is not None:
             ax[1].plot(t[i0:i1] - t[i0], off[i0:i1], color=c, lw=1.5, label=f"attempt {k + 1}")
     ax[0].set_aspect("equal", "datalim")
-    ax[0].set_xlabel("x (m)"); ax[0].set_ylabel("y (m, + = left)")
+    ax[0].set_xlabel("x (m)"); ax[0].set_ylabel("y (m)")
     ax[0].set_title(f"Run {n}: {path_name}, {run['mode']}, {run['v_cmd']} m/s  "
                     f"({len(segs)} attempt{'s' if len(segs) != 1 else ''}, dots = start)")
     ax[0].grid(True); ax[0].legend(fontsize=7, ncol=2)
@@ -319,7 +319,7 @@ def plot_run(run, t_max, out_dir):
     # At least +/-MIN_OFFSET_AXIS_M so small tracking errors aren't blown up
     lo, hi = ax[1].get_ylim()
     ax[1].set_ylim(min(lo, -MIN_OFFSET_AXIS_M), max(hi, MIN_OFFSET_AXIS_M))
-    ax[1].set_xlabel("time since attempt start (s)"); ax[1].set_ylabel("lateral offset (m, + = left)")
+    ax[1].set_xlabel("Time since attempt start (s)"); ax[1].set_ylabel("Path error (m)")
     ax[1].grid(True)
     if segs and off is not None:
         ax[1].legend(fontsize=7, ncol=3)
@@ -345,7 +345,7 @@ def plot_overview(runs, out_dir):
             a.plot(xs[0], ys[0], "o", ms=3, color=a.lines[-1].get_color())
         a.set_title(f"{name}: every automatic attempt (dots = start)")
         a.set_aspect("equal", "datalim"); a.grid(True); a.legend(fontsize=6, ncol=4)
-        a.set_xlabel("x (m)"); a.set_ylabel("y (m, + = left)")
+        a.set_xlabel("x (m)"); a.set_ylabel("y (m)")
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "overview.png"), dpi=100); plt.close(fig)
 
 
