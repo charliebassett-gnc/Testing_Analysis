@@ -73,6 +73,8 @@ CONVERGED_M = 0.10       # |offset| below this counts as on the line
 CONVERGED_HOLD_S = 2.0   # ...and must stay there this long
 TIME_STEP_S = 5          # shared time axis is rounded up to a multiple of this
 MIN_OFFSET_AXIS_M = 0.5  # offset axis always shows at least +/- this
+OFFSET_STEP_M = 0.25     # shared offset axis is rounded up to a multiple of this
+OUTLIER_FACTOR = 1.5     # offset axis stops at this x the 90th-percentile attempt peak
 
 LOG_NAME = re.compile(r"_run\d+_(\d{4}-\d{2}-\d{2})_\d{2}-\d{2}")
 
@@ -380,7 +382,18 @@ def analyse_run(n, rid, nav_path, tag, log_dir, args):
 
 # ---------------------------------------------------------------- plotting
 
-def plot_run(run, t_max, out_dir):
+def offset_axis_limit(rows):
+    """Shared +/- limit for every run's path-error axis on one day: the largest
+    attempt peak |offset|, but no more than OUTLIER_FACTOR x the 90th percentile
+    of the peaks so one wild attempt can't flatten every other graph."""
+    peaks = [r["max_offset_m"] for r in rows if r.get("max_offset_m", "") != ""]
+    if not peaks:
+        return MIN_OFFSET_AXIS_M
+    lim = min(max(peaks), OUTLIER_FACTOR * float(np.percentile(peaks, 90)))
+    return max(MIN_OFFSET_AXIS_M, OFFSET_STEP_M * math.ceil(lim / OFFSET_STEP_M - 1e-9))
+
+
+def plot_run(run, t_max, y_max, out_dir):
     n, t, x, y, off, segs = run["id"], run["t"], run["x"], run["y"], run["off"], run["segs"]
     path, path_name = run["path"], run["path_name"]
     fig, ax = plt.subplots(2, 1, figsize=(11, 9), gridspec_kw={"height_ratios": [3, 2]})
@@ -391,6 +404,7 @@ def plot_run(run, t_max, out_dir):
     if path is not None:
         ax[0].plot(path[:, 0], path[:, 1], "k--", lw=2, label=f"path {path_name}")
     colours = plt.cm.tab10(np.linspace(0, 1, 10))
+    clipped = []
     for k, (i0, i1) in enumerate(segs):
         c = colours[k % 10]
         ax[0].plot(x[i0:i1], y[i0:i1], color=c, lw=2, label=f"attempt {k + 1}")
@@ -399,6 +413,11 @@ def plot_run(run, t_max, out_dir):
             if run["off_meas"] is not None:
                 ax[1].plot(t[i0:i1] - t[i0], run["off_meas"][i0:i1], color=c, lw=0.5, alpha=0.3)
             ax[1].plot(t[i0:i1] - t[i0], off[i0:i1], color=c, lw=1.5, label=f"attempt {k + 1}")
+            o = off[i0:i1]
+            out = np.abs(o) > y_max
+            if out.any():  # beyond the shared axis: mark at the edge
+                ax[1].plot((t[i0:i1] - t[i0])[out], np.sign(o[out]) * y_max * 0.97, "|", color=c, ms=8, mew=1.5)
+                clipped.append(f"attempt {k + 1} peak {np.nanmax(np.abs(o)):.2f} m")
     ax[0].set_aspect("equal", "datalim")
     ax[0].set_xlabel("x (m)"); ax[0].set_ylabel("y (m)")
     noise = f", noise {run['noise_setting']}" if run["noise_setting"] else ""
@@ -408,9 +427,10 @@ def plot_run(run, t_max, out_dir):
     ax[1].axhspan(-CONVERGED_M, CONVERGED_M, color="g", alpha=0.1)
     ax[1].axhline(0, color="k", lw=0.8)
     ax[1].set_xlim(0, t_max)
-    # At least +/-MIN_OFFSET_AXIS_M so small tracking errors aren't blown up
-    lo, hi = ax[1].get_ylim()
-    ax[1].set_ylim(min(lo, -MIN_OFFSET_AXIS_M), max(hi, MIN_OFFSET_AXIS_M))
+    ax[1].set_ylim(-y_max, y_max)  # same for every run of the day
+    if clipped:
+        ax[1].text(0.99, 0.03, "off scale (ticks at edge): " + ", ".join(clipped), transform=ax[1].transAxes,
+                   ha="right", fontsize=7, color="r", bbox=dict(fc="w", alpha=0.8, lw=0))
     ax[1].set_xlabel("Time since attempt start (s)")
     ax[1].set_ylabel("Path error (m)" + ("\n(faint = measured with noise)" if run["off_meas"] is not None else ""))
     ax[1].grid(True)
@@ -523,12 +543,13 @@ def analyse_date(date, args):
         return
     longest = max(r["duration_s"] for r in all_rows)
     t_max = TIME_STEP_S * math.ceil(longest / TIME_STEP_S)
+    y_max = offset_axis_limit(all_rows)
 
     os.makedirs(out_dir, exist_ok=True)
     if args.runs:
         runs = [run for run in runs if run["n"] in args.runs]
     for run in runs:
-        plot_run(run, t_max, out_dir)
+        plot_run(run, t_max, y_max, out_dir)
     rows = [r for run in runs for r in run["rows"]]
     if not args.runs:  # a subset shouldn't overwrite the full day's table/overview
         plot_overview(runs, out_dir)
@@ -548,7 +569,7 @@ def analyse_date(date, args):
               f"  {r['noise']}")
     saved = "run graphs" if args.runs else \
         "attempts.csv, overview.png, " + ("noise_distribution.png, " if has_noise else "") + "and run graphs"
-    print(f"\nSaved {saved} (time axis 0-{t_max} s) to results\\{date}")
+    print(f"\nSaved {saved} (time axis 0-{t_max} s, path error axis +/-{y_max:g} m) to results\\{date}")
 
 
 # ---------------------------------------------------------------- main
