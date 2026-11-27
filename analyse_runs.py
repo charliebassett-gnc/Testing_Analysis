@@ -149,12 +149,28 @@ def read_csv(path):
 
 
 def find_runs(log_dir):
-    runs = {}
+    """[(run number, run id, nav log path, timestamp tag)] sorted by number then time.
+    A run is identified by its number and timestamp, so if the Jetson's run counter
+    resets the same day both runs are kept. The id is the number, or number_HH-MM
+    when that number appears more than once (used in graph names and attempts.csv)."""
+    runs = []
     for p in glob.glob(os.path.join(log_dir, "nav_wrap_test_run*_*.csv")):
         m = re.search(r"nav_wrap_test_run(\d+)_(.+)\.csv$", os.path.basename(p))
         if m:
-            runs[int(m.group(1))] = (p, m.group(2))
-    return dict(sorted(runs.items()))
+            runs.append((int(m.group(1)), m.group(2), p))
+    runs.sort()
+    counts = {}
+    for n, _, _ in runs:
+        counts[n] = counts.get(n, 0) + 1
+    out = []
+    for n, tag, p in runs:
+        rid = str(n) if counts[n] == 1 else f"{n}_{tag.split('_', 1)[-1]}"
+        out.append((n, rid, p, tag))
+    dup = sorted({n for n, c in counts.items() if c > 1})
+    if dup:
+        print(f"Run number(s) {', '.join(map(str, dup))} appear more than once (run counter reset?); "
+              f"kept separately as run_HH-MM")
+    return out
 
 
 def find_noise_log(log_dir, tag, time):
@@ -268,7 +284,7 @@ def segments(forward, reversing, min_len, max_gap):
 
 # ---------------------------------------------------------------- analysis
 
-def analyse_run(n, nav_path, tag, log_dir, args):
+def analyse_run(n, rid, nav_path, tag, log_dir, args):
     """Returns a dict with the run's data and attempt rows, or None."""
     meta_p = nav_path.replace(".csv", "_metadata.json")
     meta = json.load(open(meta_p)) if os.path.isfile(meta_p) else {}
@@ -276,7 +292,7 @@ def analyse_run(n, nav_path, tag, log_dir, args):
 
     nav = read_csv(nav_path)
     if not nav or len(nav["time"]) < 50:
-        print(f"run {n}: too short, skipped")
+        print(f"run {rid}: too short, skipped")
         return None
     ctrl = read_csv(ctrl_p[0]) if ctrl_p else {}
 
@@ -330,7 +346,7 @@ def analyse_run(n, nav_path, tag, log_dir, args):
         # Only meaningful when the Jetson actually asked for some steering
         corr = round(float(np.corrcoef(s[ok], r[ok])[0, 1]), 2) \
             if ok.sum() > 20 and s[ok].std() > 0.02 and r[ok].std() > 1e-3 else ""
-        row = dict(run=n, attempt=k, path=path_name, mode=mode,
+        row = dict(run=rid, attempt=k, path=path_name, mode=mode,
                    v_cmd=v_cmd, noise=noise_setting, t_start=round(t[i0], 1), duration_s=round(t[i1 - 1] - t[i0], 1),
                    distance_m=round(dist, 1), auto_corr=corr, note="")
         if off is not None:
@@ -357,7 +373,7 @@ def analyse_run(n, nav_path, tag, log_dir, args):
             row["note"] = "; ".join(filter(None, [row["note"], f"steering and yaw rate don't match: {why}"]))
         rows.append(row)
 
-    return dict(n=n, t=t, x=x, y=y, off=off, segs=segs, path=path, path_name=path_name,
+    return dict(n=n, id=rid, t=t, x=x, y=y, off=off, segs=segs, path=path, path_name=path_name,
                 mode=mode, v_cmd=v_cmd, rows=rows, x_meas=x_meas, y_meas=y_meas, off_meas=off_meas,
                 noise=noise, noise_meta=noise_meta, noise_setting=noise_setting)
 
@@ -365,7 +381,7 @@ def analyse_run(n, nav_path, tag, log_dir, args):
 # ---------------------------------------------------------------- plotting
 
 def plot_run(run, t_max, out_dir):
-    n, t, x, y, off, segs = run["n"], run["t"], run["x"], run["y"], run["off"], run["segs"]
+    n, t, x, y, off, segs = run["id"], run["t"], run["x"], run["y"], run["off"], run["segs"]
     path, path_name = run["path"], run["path_name"]
     fig, ax = plt.subplots(2, 1, figsize=(11, 9), gridspec_kw={"height_ratios": [3, 2]})
     if run["x_meas"] is not None:
@@ -411,7 +427,7 @@ def plot_overview(runs, out_dir):
         ov = overview.setdefault(run["path_name"], {"path": run["path"], "lines": []})
         for k, (i0, i1) in enumerate(run["segs"], 1):
             noise = f" {run['noise_setting']}" if run["noise_setting"] not in ("", "OFF") else ""
-            ov["lines"].append((f"r{run['n']}.{k} {run['mode']} {run['v_cmd']}{noise}",
+            ov["lines"].append((f"r{run['id']}.{k} {run['mode']} {run['v_cmd']}{noise}",
                                 run["x"][i0:i1], run["y"][i0:i1]))
     paths = list(overview.items())
     fig, axs = plt.subplots(len(paths), 1, figsize=(11, 5 * len(paths)), squeeze=False)
@@ -441,7 +457,7 @@ def plot_noise(runs, out_dir):
             bias = float(bias[bias_f[1]] if len(bias_f) > 1 else bias)
             level = nm.get("level") or f"std {std:g}"
             g = groups.setdefault((key, level), dict(std=std, bias=bias, unit=unit, runs=[], data=[], seeds=set()))
-            g["runs"].append(run["n"]); g["data"].append(run["noise"][key])
+            g["runs"].append(run["id"]); g["data"].append(run["noise"][key])
             g["seeds"].add(nm.get("effective_seed"))
     if not groups:
         return False
@@ -499,8 +515,8 @@ def analyse_date(date, args):
 
     # Every run of the day is analysed so the shared time axis is the same
     # whether or not --runs picks a subset to re-plot.
-    runs = [r for r in (analyse_run(n, p, tag, log_dir, args)
-                        for n, (p, tag) in find_runs(log_dir).items()) if r]
+    runs = [r for r in (analyse_run(n, rid, p, tag, log_dir, args)
+                        for n, rid, p, tag in find_runs(log_dir)) if r]
     all_rows = [r for run in runs for r in run["rows"]]
     if not all_rows:
         print("No runs with automatic attempts found.")
