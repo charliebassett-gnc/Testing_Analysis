@@ -5,7 +5,7 @@ Folder layout (everything lives next to this script):
   analyse_runs.py
   incoming\\            copy the Jetson logs in here (loose files or a whole folder)
   raw_data\\<date>\\     the script moves the logs here, sorted by the date in their file name
-  results\\<date>\\      attempts.csv, overview.png and runN.png for that day
+  results\\<date>\\      attempts.csv, overview.png, runN.png (and noise_distribution.png) for that day
   waypoints\\           waypoint CSVs (falls back to the JetsonControl repo's waypoints folder)
 
 Usage (laptop PowerShell):
@@ -31,6 +31,13 @@ How an attempt is detected
 
 Lateral offset = perpendicular distance from the NAV-960 position to the path
 (+ = left of the path, looking along the direction of travel).
+
+Injected sensor noise: when a run's metadata has sensor_noise enabled, the nav
+log holds the noisy position the Jetson saw. The matching sensor_noise_run*.csv
+(own run numbering; matched on timestamp and tick times) logs clean and noisy
+NAV values, so the noise is removed exactly and every metric uses the TRUE
+position and heading. The noisy position/offset is drawn faintly in runN.png,
+and noise_distribution.png shows the injected noise (noisy - clean).
 
 All runN.png graphs from one date share the same time axis so controllers
 can be compared directly.
@@ -68,6 +75,14 @@ TIME_STEP_S = 5          # shared time axis is rounded up to a multiple of this
 MIN_OFFSET_AXIS_M = 0.5  # offset axis always shows at least +/- this
 
 LOG_NAME = re.compile(r"_run\d+_(\d{4}-\d{2}-\d{2})_\d{2}-\d{2}")
+
+# Injected sensor noise: (sensor_noise log key, metadata channel, unit, std field, bias field[, index])
+NOISE_CHANNELS = [("x", "pos", "m", "pos_std_m", ("pos_bias_m", 0)),
+                  ("y", "pos", "m", "pos_std_m", ("pos_bias_m", 1)),
+                  ("yaw", "yaw", "deg", "yaw_std_deg", ("yaw_bias_deg",)),
+                  ("yaw_rate", "yaw_rate", "deg/s", "yaw_rate_std_deg_s", ("yaw_rate_bias_deg_s",)),
+                  ("v", "speed", "m/s", "speed_std_m_s", ("speed_bias_m_s",))]
+NOISE_LEVELS = ["LOW", "MED", "HIGH"]
 
 
 # ---------------------------------------------------------------- sorting incoming
@@ -140,6 +155,44 @@ def find_runs(log_dir):
         if m:
             runs[int(m.group(1))] = (p, m.group(2))
     return dict(sorted(runs.items()))
+
+
+def find_noise_log(log_dir, tag, time):
+    """The sensor_noise log written alongside a nav log (only when noise was on).
+    Its run number is counted separately, so match on the timestamp tag and
+    identical tick times."""
+    for p in glob.glob(os.path.join(log_dir, f"sensor_noise_run*_{tag}.csv")):
+        s = read_csv(p)
+        if s and np.array_equal(s["time"], time):
+            return s
+    return None
+
+
+def remove_noise(nav, s, channels):
+    """True local x, y, yaw (deg) and the injected noise per channel.
+
+    The nav log holds the Jetson's local-frame state built from the *noisy* NAV
+    values. The sensor_noise log has the clean and noisy NAV values each tick, so
+    noise = noisy - clean exactly. The NAV->local rotation is fitted from the
+    noisy positions (exact up to float rounding) and the position noise rotated
+    into the local frame and subtracted. Local yaw has the opposite sign to NAV
+    yaw, so its noise is added back."""
+    active = s["active"] == 1
+    held = (nav["raw_x"] == 0) & (nav["raw_y"] == 0)  # frame initialisation, held at 0
+    loc = nav["raw_x"] + 1j * nav["raw_y"]
+    d = (s["noisy_x"] - s["noisy_x"][0]) + 1j * (s["noisy_y"] - s["noisy_y"][0])
+    use = active & ~held
+    rot = np.exp(1j * np.angle(np.sum(loc[use] * np.conj(d[use])))) if use.any() else 1.0
+    dpos = rot * ((s["noisy_x"] - s["clean_x"]) + 1j * (s["noisy_y"] - s["clean_y"]))
+    clean = np.where(held, 0, loc - dpos)
+    dyaw = (s["noisy_yaw"] - s["clean_yaw"] + 180) % 360 - 180
+    yaw = np.where(held & (nav["yaw"] == 0), 0, nav["yaw"] + dyaw)
+    noise = {}
+    for key, group, *_ in NOISE_CHANNELS:
+        if group in channels:
+            e = s[f"noisy_{key}"] - s[f"clean_{key}"]
+            noise[key] = ((e + 180) % 360 - 180 if key == "yaw" else e)[active]
+    return clean.real, clean.imag, yaw, noise
 
 
 def load_path(name, wp_dirs):
@@ -228,7 +281,20 @@ def analyse_run(n, nav_path, tag, log_dir, args):
     ctrl = read_csv(ctrl_p[0]) if ctrl_p else {}
 
     t = nav["time"] - nav["time"][0]
-    x, y, yaw = nav["raw_x"], nav["raw_y"], np.unwrap(np.radians(nav["yaw"]))
+    x, y, yaw_log = nav["raw_x"], nav["raw_y"], nav["yaw"]
+    noise_meta = meta.get("sensor_noise") or {}
+    noise_setting = noise_meta.get("setting", "")
+    x_meas = y_meas = None
+    noise = {}
+    if noise_meta.get("enabled"):
+        snz = find_noise_log(log_dir, tag, nav["time"])
+        if snz is None:
+            print(f"run {n}: noise {noise_setting} but no matching sensor_noise log; offsets use the noisy position")
+        else:
+            # Metrics use the true position; the noisy one the Jetson saw is kept for plotting
+            x_meas, y_meas = x, y
+            x, y, yaw_log, noise = remove_noise(nav, snz, noise_meta.get("channels", []))
+    yaw = np.unwrap(np.radians(yaw_log))
     yaw_deg = np.degrees(yaw)
     N = len(t)
     steer = ctrl.get("steering_command", np.full(N, np.nan))[:N]
@@ -249,9 +315,11 @@ def analyse_run(n, nav_path, tag, log_dir, args):
     segs = segments(v_fwd > 0.5 * v_cmd, v_fwd < -0.1,
                     int(args.min_attempt * LOG_HZ), int(1.5 * LOG_HZ))
 
-    off = herr = None
+    off = herr = off_meas = None
     if path is not None:
         off, herr = path_errors(x, y, yaw_deg, path)
+        if x_meas is not None:
+            off_meas = path_errors(x_meas, y_meas, yaw_deg, path)[0]
 
     rows = []
     for k, (i0, i1) in enumerate(segs, 1):
@@ -263,7 +331,7 @@ def analyse_run(n, nav_path, tag, log_dir, args):
         corr = round(float(np.corrcoef(s[ok], r[ok])[0, 1]), 2) \
             if ok.sum() > 20 and s[ok].std() > 0.02 and r[ok].std() > 1e-3 else ""
         row = dict(run=n, attempt=k, path=path_name, mode=mode,
-                   v_cmd=v_cmd, t_start=round(t[i0], 1), duration_s=round(t[i1 - 1] - t[i0], 1),
+                   v_cmd=v_cmd, noise=noise_setting, t_start=round(t[i0], 1), duration_s=round(t[i1 - 1] - t[i0], 1),
                    distance_m=round(dist, 1), auto_corr=corr, note="")
         if off is not None:
             o, h = off[sl], herr[sl]
@@ -285,11 +353,13 @@ def analyse_run(n, nav_path, tag, log_dir, args):
                 notes.append("never converged")
             row["note"] = "; ".join(notes)
         if corr != "" and corr < 0.3:
-            row["note"] = "; ".join(filter(None, [row["note"], "steering and yaw rate don't match: may be manual"]))
+            why = "expected with injected noise" if noise else "may be manual"
+            row["note"] = "; ".join(filter(None, [row["note"], f"steering and yaw rate don't match: {why}"]))
         rows.append(row)
 
     return dict(n=n, t=t, x=x, y=y, off=off, segs=segs, path=path, path_name=path_name,
-                mode=mode, v_cmd=v_cmd, rows=rows)
+                mode=mode, v_cmd=v_cmd, rows=rows, x_meas=x_meas, y_meas=y_meas, off_meas=off_meas,
+                noise=noise, noise_meta=noise_meta, noise_setting=noise_setting)
 
 
 # ---------------------------------------------------------------- plotting
@@ -298,6 +368,9 @@ def plot_run(run, t_max, out_dir):
     n, t, x, y, off, segs = run["n"], run["t"], run["x"], run["y"], run["off"], run["segs"]
     path, path_name = run["path"], run["path_name"]
     fig, ax = plt.subplots(2, 1, figsize=(11, 9), gridspec_kw={"height_ratios": [3, 2]})
+    if run["x_meas"] is not None:
+        ax[0].plot(run["x_meas"], run["y_meas"], color="0.6", lw=0.5, alpha=0.5,
+                   label="noisy position the Jetson saw")
     ax[0].plot(x, y, color="0.75", lw=1, label="whole log (incl. manual)")
     if path is not None:
         ax[0].plot(path[:, 0], path[:, 1], "k--", lw=2, label=f"path {path_name}")
@@ -307,10 +380,13 @@ def plot_run(run, t_max, out_dir):
         ax[0].plot(x[i0:i1], y[i0:i1], color=c, lw=2, label=f"attempt {k + 1}")
         ax[0].plot(x[i0], y[i0], "o", color=c)
         if off is not None:
+            if run["off_meas"] is not None:
+                ax[1].plot(t[i0:i1] - t[i0], run["off_meas"][i0:i1], color=c, lw=0.5, alpha=0.3)
             ax[1].plot(t[i0:i1] - t[i0], off[i0:i1], color=c, lw=1.5, label=f"attempt {k + 1}")
     ax[0].set_aspect("equal", "datalim")
     ax[0].set_xlabel("x (m)"); ax[0].set_ylabel("y (m)")
-    ax[0].set_title(f"Run {n}: {path_name}, {run['mode']}, {run['v_cmd']} m/s  "
+    noise = f", noise {run['noise_setting']}" if run["noise_setting"] else ""
+    ax[0].set_title(f"Run {n}: {path_name}, {run['mode']}, {run['v_cmd']} m/s{noise}  "
                     f"({len(segs)} attempt{'s' if len(segs) != 1 else ''}, dots = start)")
     ax[0].grid(True); ax[0].legend(fontsize=7, ncol=2)
     ax[1].axhspan(-CONVERGED_M, CONVERGED_M, color="g", alpha=0.1)
@@ -319,7 +395,8 @@ def plot_run(run, t_max, out_dir):
     # At least +/-MIN_OFFSET_AXIS_M so small tracking errors aren't blown up
     lo, hi = ax[1].get_ylim()
     ax[1].set_ylim(min(lo, -MIN_OFFSET_AXIS_M), max(hi, MIN_OFFSET_AXIS_M))
-    ax[1].set_xlabel("Time since attempt start (s)"); ax[1].set_ylabel("Path error (m)")
+    ax[1].set_xlabel("Time since attempt start (s)")
+    ax[1].set_ylabel("Path error (m)" + ("\n(faint = measured with noise)" if run["off_meas"] is not None else ""))
     ax[1].grid(True)
     if segs and off is not None:
         ax[1].legend(fontsize=7, ncol=3)
@@ -333,7 +410,8 @@ def plot_overview(runs, out_dir):
     for run in runs:
         ov = overview.setdefault(run["path_name"], {"path": run["path"], "lines": []})
         for k, (i0, i1) in enumerate(run["segs"], 1):
-            ov["lines"].append((f"r{run['n']}.{k} {run['mode']} {run['v_cmd']}",
+            noise = f" {run['noise_setting']}" if run["noise_setting"] not in ("", "OFF") else ""
+            ov["lines"].append((f"r{run['n']}.{k} {run['mode']} {run['v_cmd']}{noise}",
                                 run["x"][i0:i1], run["y"][i0:i1]))
     paths = list(overview.items())
     fig, axs = plt.subplots(len(paths), 1, figsize=(11, 5 * len(paths)), squeeze=False)
@@ -349,9 +427,67 @@ def plot_overview(runs, out_dir):
     fig.tight_layout(); fig.savefig(os.path.join(out_dir, "overview.png"), dpi=100); plt.close(fig)
 
 
+def plot_noise(runs, out_dir):
+    """Histogram of the injected noise per channel (rows) and level (columns),
+    pooled over runs, with the fitted and the configured normal PDF."""
+    groups = {}
+    for run in runs:
+        nm = run["noise_meta"]
+        for key, group, unit, std_f, bias_f in NOISE_CHANNELS:
+            if key not in run["noise"]:
+                continue
+            std = float(nm.get(std_f, 0.0))
+            bias = nm.get(bias_f[0], 0.0)
+            bias = float(bias[bias_f[1]] if len(bias_f) > 1 else bias)
+            level = nm.get("level") or f"std {std:g}"
+            g = groups.setdefault((key, level), dict(std=std, bias=bias, unit=unit, runs=[], data=[], seeds=set()))
+            g["runs"].append(run["n"]); g["data"].append(run["noise"][key])
+            g["seeds"].add(nm.get("effective_seed"))
+    if not groups:
+        return False
+    keys = [c[0] for c in NOISE_CHANNELS if any(k == c[0] for k, _ in groups)]
+    levels = sorted({lv for _, lv in groups}, key=lambda lv: (NOISE_LEVELS.index(lv) if lv in NOISE_LEVELS else 99, lv))
+    fig, axs = plt.subplots(len(keys), len(levels), figsize=(4.3 * len(levels), 3.3 * len(keys)), squeeze=False)
+    for i, key in enumerate(keys):
+        for j, level in enumerate(levels):
+            a = axs[i, j]
+            g = groups.get((key, level))
+            if g is None:
+                a.text(0.5, 0.5, "not tested", ha="center", va="center", transform=a.transAxes, color="0.5")
+                a.set_title(f"{key} noise, {level}"); a.set_xticks([]); a.set_yticks([])
+                continue
+            e = np.concatenate(g["data"])
+            mu, sd = float(np.mean(e)), float(np.std(e))
+            span = 4.5 * max(g["std"], sd)
+            xs = np.linspace(g["bias"] - span, g["bias"] + span, 300)
+            a.hist(e, bins=60, range=(xs[0], xs[-1]), density=True, color="tab:blue", alpha=0.45, label="injected")
+            a.plot(xs, np.exp(-0.5 * ((xs - mu) / sd) ** 2) / (sd * math.sqrt(2 * math.pi)), "b-", lw=1.5,
+                   label="fitted normal")
+            if g["std"] > 0:
+                a.plot(xs, np.exp(-0.5 * ((xs - g["bias"]) / g["std"]) ** 2) / (g["std"] * math.sqrt(2 * math.pi)),
+                       "r--", lw=1.5, label="configured")
+            within = 100 * np.mean(np.abs(e - mu) < sd)
+            # Every run with the same seed replays the same sequence, so pooled draws repeat
+            distinct = f" (same seed: <={max(len(d) for d in g['data'])} distinct)" \
+                if len(g["runs"]) > 1 and len(g["seeds"]) == 1 else ""
+            a.text(0.02, 0.97, f"runs {', '.join(map(str, g['runs']))}\nn = {len(e)}{distinct}\n"
+                               f"mean = {mu:+.4g} {g['unit']}\nstd = {sd:.4g} (cfg {g['std']:g}, bias {g['bias']:g})\n"
+                               f"within 1 std: {within:.1f} %",
+                   transform=a.transAxes, va="top", fontsize=6.5, bbox=dict(fc="w", alpha=0.8, lw=0))
+            a.set_title(f"{key} noise, {level}"); a.set_xlabel(f"noisy - clean ({g['unit']})")
+            a.set_ylim(0, a.get_ylim()[1] * 1.45)  # room for the text box and legend
+            a.grid(True, alpha=0.3); a.legend(fontsize=6, loc="upper right")
+    fig.suptitle("Injected sensor noise = noisy - clean NAV value from sensor_noise_run*.csv "
+                 "(ticks with noise active, NAV units).\nPooled over runs with that channel on; "
+                 "bars = histogram, solid = normal fitted to the data, dashed = N(bias, std) from the run metadata",
+                 fontsize=9)
+    fig.tight_layout(); fig.savefig(os.path.join(out_dir, "noise_distribution.png"), dpi=100); plt.close(fig)
+    return True
+
+
 # ---------------------------------------------------------------- one date
 
-COLS = ["run", "attempt", "path", "mode", "v_cmd", "t_start", "duration_s", "distance_m", "auto_corr",
+COLS = ["run", "attempt", "path", "mode", "v_cmd", "noise", "t_start", "duration_s", "distance_m", "auto_corr",
         "start_offset_m", "start_heading_deg", "converge_s", "converge_m", "overshoot_m",
         "rms_offset_m", "max_offset_m", "end_offset_m", "note"]
 
@@ -380,19 +516,22 @@ def analyse_date(date, args):
     rows = [r for run in runs for r in run["rows"]]
     if not args.runs:  # a subset shouldn't overwrite the full day's table/overview
         plot_overview(runs, out_dir)
+        has_noise = plot_noise(runs, out_dir)
         with open(os.path.join(out_dir, "attempts.csv"), "w", newline="") as f:
             wr = csv.DictWriter(f, fieldnames=COLS, extrasaction="ignore")
             wr.writeheader(); wr.writerows(rows)
 
     hdr = f"{'run':>4} {'att':>3} {'path':12} {'mode':4} {'v':>3} {'t0':>6} {'dur':>5} {'dist':>5} {'auto':>5} " \
-          f"{'off0':>6} {'hdg0':>6} {'conv_s':>6} {'conv_m':>6} {'over':>5} {'rms':>6} {'end':>6}"
+          f"{'off0':>6} {'hdg0':>6} {'conv_s':>6} {'conv_m':>6} {'over':>5} {'rms':>6} {'end':>6}  noise"
     print(hdr); print("-" * len(hdr))
     for r in rows:
         print(f"{r['run']:>4} {r['attempt']:>3} {r['path'][:12]:12} {r['mode'][:4]:4} {r['v_cmd']:>3} "
               f"{r['t_start']:>6} {r['duration_s']:>5} {r['distance_m']:>5} {r['auto_corr']:>5} "
               f"{r.get('start_offset_m', ''):>6} {r.get('start_heading_deg', ''):>6} {str(r.get('converge_s', '')):>6} "
-              f"{str(r.get('converge_m', '')):>6} {r.get('overshoot_m', ''):>5} {r.get('rms_offset_m', ''):>6} {r.get('end_offset_m', ''):>6}")
-    saved = "run graphs" if args.runs else "attempts.csv, overview.png and run graphs"
+              f"{str(r.get('converge_m', '')):>6} {r.get('overshoot_m', ''):>5} {r.get('rms_offset_m', ''):>6} {r.get('end_offset_m', ''):>6}"
+              f"  {r['noise']}")
+    saved = "run graphs" if args.runs else \
+        "attempts.csv, overview.png, " + ("noise_distribution.png, " if has_noise else "") + "and run graphs"
     print(f"\nSaved {saved} (time axis 0-{t_max} s) to results\\{date}")
 
 

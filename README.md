@@ -16,7 +16,7 @@ Testing_Analysis/
   analyse_runs.py      the analysis script
   incoming/            drop Jetson logs here (not committed)
   raw_data/<date>/     logs sorted by test date (not committed; archive on the shared Drive)
-  results/<date>/      attempts.csv, overview.png and runN.png for each test day
+  results/<date>/      attempts.csv, overview.png, runN.png (and noise_distribution.png) for each test day
   waypoints/           waypoint CSVs for the test paths
 ```
 
@@ -81,13 +81,37 @@ path, positive to the left of the path looking along the direction of travel. Th
 wherever the receiver's antenna offset puts it (ideally the rear-axle centre). It's not the
 Jetson's `cross_track_error`, which is measured from a point projected 5 m ahead.
 
+### Injected sensor noise
+
+Runs from 2026-11-27 on can have synthetic noise injected into the NAV values (see JetsonControl's
+*Sensor Noise Injection*). The run metadata then has a `sensor_noise` block (`enabled`, `setting`
+such as `HIGH:pos,yaw`, `channels`, `level`, std/bias per channel, `seed`) and the Jetson also
+writes a `sensor_noise_runN_*.csv` with the clean and noisy NAV `x, y, yaw, yaw_rate, v` each tick
+and an `active` flag. Its run number is counted separately from `nav_wrap_test`, so the script
+matches it by the timestamp in the file name and identical tick times.
+
+With noise on, `nav_wrap_test`'s position and heading are the noisy values the controller saw.
+The script removes the noise exactly (noisy ? clean, rotated into the local path frame), so
+**every metric and the solid lines in the graphs use the true position and heading**. The noisy
+position and offset are drawn faintly in `runN.png`. Without a matching `sensor_noise` log the
+noisy position is used and a warning is printed.
+
 ### Graphs
 
 - `runN.png`: the trajectory with each attempt coloured (dots mark the start), and lateral
   offset against time since each attempt started. The green band is ±0.10 m.
   All graphs from one day share the same time axis (0 to the day's longest attempt, rounded up
   to 5 s) so controllers can be compared directly. The offset axis shows at least ±0.5 m.
+  Runs with injected noise also show the noisy position the Jetson saw (thin grey) and the
+  noisy offset (faint, same colour); the noise setting is in the title.
 - `overview.png`: every automatic attempt from the day overlaid, one panel per path.
+- `noise_distribution.png` (only on days with noise): histograms of the injected noise
+  (noisy ? clean from `sensor_noise_run*.csv`, ticks with noise active, NAV units), one row per
+  channel (`x`, `y`, `yaw`, `yaw_rate`, `v`) and one column per level (`LOW`/`MED`/`HIGH`), pooled
+  over the runs with that channel on. Each panel overlays the normal fitted to the data (solid)
+  and the configured N(bias, std) from the metadata (dashed), with mean, std and % within 1 std.
+  Every preset uses the same seed, so runs at one level replay the same sequence and pooled
+  samples repeat (the panel shows the number of distinct draws).
 
 ### attempts.csv
 
@@ -95,8 +119,9 @@ Jetson's `cross_track_error`, which is measured from a point projected 5 m ahead
 | --- | --- |
 | `run`, `attempt` | Jetson run number and attempt within it |
 | `path`, `mode`, `v_cmd` | Waypoint file, controller (`pid`/`onnx`) and commanded speed (m/s), from the run's metadata |
+| `noise` | Injected sensor noise setting from the metadata (`OFF`, or e.g. `HIGH:pos,yaw`); blank for logs from before noise was recorded |
 | `t_start`, `duration_s`, `distance_m` | When the attempt started in the log, how long it lasted, how far it travelled |
-| `auto_corr` | Steering-command vs yaw-rate correlation (blank if the Jetson barely steered) |
+| `auto_corr` | Steering-command vs yaw-rate correlation (blank if the Jetson barely steered). Injected noise makes the steering noisy, so it is low on noisy runs |
 | `start_offset_m`, `start_heading_deg` | Offset and heading error to the path at the start |
 | `converge_s`, `converge_m` | Time and distance until \|offset\| < 0.10 m held for 2 s (blank = never) |
 | `overshoot_m` | Furthest it went past the line on the other side |
