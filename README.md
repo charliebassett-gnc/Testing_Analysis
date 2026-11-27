@@ -117,7 +117,7 @@ noisy position is used and a warning is printed.
 
 | Column | Meaning |
 | --- | --- |
-| `run`, `attempt` | Jetson run number and attempt within it |
+| `run`, `attempt` | Jetson run number and attempt within it. If the same run number appears twice on one day (the Jetson's run counter was reset), both runs are kept and labelled `N_HH-MM` from their log time, including their `runN_HH-MM.png` graphs |
 | `path`, `mode`, `v_cmd` | Waypoint file, controller (`pid`/`onnx`) and commanded speed (m/s), from the run's metadata |
 | `noise` | Injected sensor noise setting from the metadata (`OFF`, or e.g. `HIGH:pos,yaw`); blank for logs from before noise was recorded |
 | `t_start`, `duration_s`, `distance_m` | When the attempt started in the log, how long it lasted, how far it travelled |
