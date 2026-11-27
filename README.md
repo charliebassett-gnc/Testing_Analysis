@@ -101,7 +101,11 @@ noisy position is used and a warning is printed.
 - `runN.png`: the trajectory with each attempt coloured (dots mark the start), and lateral
   offset against time since each attempt started. The green band is ±0.10 m.
   All graphs from one day share the same time axis (0 to the day's longest attempt, rounded up
-  to 5 s) so controllers can be compared directly. The offset axis shows at least ±0.5 m.
+  to 5 s) so controllers can be compared directly. They also share the same path-error axis:
+  ± the largest attempt peak |offset| of the day, capped at 1.5 × the 90th percentile of the
+  attempt peaks so one wild attempt doesn't flatten every graph, rounded up to 0.25 m and at
+  least ±0.5 m. Offsets beyond it are marked with ticks at the edge and the attempt's peak is
+  noted in red. The limit used is printed when the script finishes.
   Runs with injected noise also show the noisy position the Jetson saw (thin grey) and the
   noisy offset (faint, same colour); the noise setting is in the title.
 - `overview.png`: every automatic attempt from the day overlaid, one panel per path.
